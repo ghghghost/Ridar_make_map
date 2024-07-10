@@ -1,10 +1,11 @@
+
 import cv2
 import time
 import keyboard
 
 def save_frames_from_camera(interval=0.5):
     # 카메라 객체 생성 (기본 카메라 장치 사용)
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
     if not cap.isOpened():
         print("카메라를 열 수 없습니다.")
         return
@@ -31,7 +32,8 @@ def save_frames_from_camera(interval=0.5):
         # 0.5초 간격으로 프레임 저장
         if elapsed_time >= interval:
             frame_count += 1
-            filename = f"frame_{frame_count}.jpg"
+            filename = f"." \
+                       f"/interval/frame_{frame_count}.jpg"
             cv2.imwrite(filename, frame)
             print(f"이미지 저장됨: {filename}")
             start_time = current_time
