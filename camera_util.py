@@ -59,6 +59,11 @@ def transform_bev(image, src_points, dst_points):
     
     return birds_eye_view
 
+def get_nonzero_coordinates(image):
+    # 0이 아닌 값들의 좌표를 찾기
+    nonzero_coords = np.transpose(np.nonzero(image))
+    return nonzero_coords
+
 def insert_bev2map(img, map, y_min = 50, y_max = 250, x_length = 84):
     y_padding = (map.shape[1] / 2) - y_max
     x_padding = (map.shape[0] / 2) - (x_length / 2)
@@ -68,6 +73,209 @@ def insert_bev2map(img, map, y_min = 50, y_max = 250, x_length = 84):
     map += new_img
 
     return map
+
+# globally define
+def get_centermap():
+    # 2000을 20등분한 구간들의 중심점을 담는 리스트 생성
+    start = 0
+    end = 2000
+    num_segments = 20
+
+    # 각 구간의 길이
+    segment_length = (end - start) / num_segments
+
+    # 구간 중심점 리스트 초기화
+    centers = []
+
+    for i in range(num_segments):
+        # 각 구간의 시작점과 끝점
+        segment_start = start + i * segment_length
+        segment_end = segment_start + segment_length
+        # 중심점 계산
+        center = (segment_start + segment_end) / 2
+        centers.append(center)
+    
+    return centers
+
+center_map = get_centermap()
+window_height = 50
+window_width = 100
+
+def make_sw(img, prev_sw, opposite_sw, time_):
+    now_sw = prev_sw.copy()
+    prev_opposite = opposite_sw.copy()
+
+    moving_distance = (time_ * 760) // 100  # 이동한 sliding window 개수
+
+    if moving_distance < 20:
+        prev_sw[:20-moving_distance] = now_sw[moving_distance:]
+        prev_opposite[:20-moving_distance] = opposite_sw[moving_distance:]
+        if 20 - moving_distance - 1 >= 0:
+            fill_value = prev_sw[20 - moving_distance - 1]
+            prev_sw[20 - moving_distance:] = [fill_value] * moving_distance
+
+            fill_value2 = prev_opposite[20 - moving_distance - 1]
+            prev_opposite[20 - moving_distance:] = [fill_value2] * moving_distance
+
+    # 확실한 점들 먼저 sliding window
+    for index, h in enumerate(now_sw):
+        # 박스 영역 자르기
+        box_region = img[h[1]-window_height:h[1]+window_height, h[0]-window_width:h[0]+window_width]
+
+        # 0이 아닌 점들의 x 좌표 찾기
+        non_zero_points = np.column_stack(np.where(box_region != 0))
+
+        # 0이 아닌 점이 없는 경우
+        if non_zero_points.size == 0:
+            now_sw[index] = [0, h[1]]
+            continue
+
+        # x 좌표 평균 계산
+        mean_x = np.mean(non_zero_points[:, 1])
+
+        # 전체 이미지에서의 x 좌표로 변환
+        mean_x_global = h[0] + mean_x - window_width
+
+        now_sw[index] = [mean_x_global, h[1]]
+
+    for index, h in enumerate(opposite_sw):
+        # 박스 영역 자르기
+        box_region = img[h[1]-window_height:h[1]+window_height, h[0]-window_width:h[0]+window_width]
+
+        # 0이 아닌 점들의 x 좌표 찾기
+        non_zero_points = np.column_stack(np.where(box_region != 0))
+
+        # 0이 아닌 점이 없는 경우
+        if non_zero_points.size == 0:
+            opposite_sw[index] = [0, h[1]]
+            continue
+
+        # x 좌표 평균 계산
+        mean_x = np.mean(non_zero_points[:, 1])
+
+        # 전체 이미지에서의 x 좌표로 변환
+        mean_x_global = h[0] + mean_x - window_width
+
+        opposite_sw[index] = [mean_x_global, h[1]]
+
+    # 0인 점: 위아래(3칸까지 확인) 기준으로 평균내기
+    for index, h in enumerate(now_sw):
+        if h[0] != 0:
+            continue
+
+        flag_up = False
+        flag_down = False
+
+        tmp_up = 0
+        tmp_down = 0
+
+        for i in range(3):
+            if flag_up and flag_down:
+                break
+
+            if not flag_up and index + i + 1 < len(now_sw) and now_sw[index + i + 1][0] != 0:
+                flag_up = True
+                tmp_up = now_sw[index + i + 1][0]
+
+            if not flag_down and index - i - 1 >= 0 and now_sw[index - i - 1][0] != 0:
+                flag_down = True
+                tmp_down = now_sw[index - i - 1][0]
+
+        # 한쪽 없으면 보이는 쪽과 똑같은 값
+        if tmp_down + tmp_up != 0:
+            if tmp_up == 0:
+                now_sw[index] = [tmp_down, h[1]]
+            elif tmp_down == 0:
+                now_sw[index] = [tmp_up, h[1]]
+            else:
+                now_sw[index] = [(tmp_up + tmp_down) / 2, h[1]]
+
+            # 3칸 이내에 있으면 평균 낸 값과 반대쪽 값의 평균 값 내기
+            if opposite_sw[index][0] != 0:
+                offset = 840 if opposite_sw[index][0] > 1000 else -840
+                now_sw[index][0] = (now_sw[index][0] + (opposite_sw[index][0] + offset)) / 2
+        else:
+            if opposite_sw[index][0] == 0:
+                now_sw[index][0] = prev_sw[index][0]
+            else:
+                offset = 840 if opposite_sw[index][0] > 1000 else -840
+                now_sw[index][0] = opposite_sw[index][0] + offset
+
+    for index, h in enumerate(opposite_sw):
+        if h[0] != 0:
+            continue
+
+        flag_up = False
+        flag_down = False
+
+        tmp_up = 0
+        tmp_down = 0
+
+        for i in range(3):
+            if flag_up and flag_down:
+                break
+
+            if not flag_up and index + i + 1 < len(opposite_sw) and opposite_sw[index + i + 1][0] != 0:
+                flag_up = True
+                tmp_up = opposite_sw[index + i + 1][0]
+
+            if not flag_down and index - i - 1 >= 0 and opposite_sw[index - i - 1][0] != 0:
+                flag_down = True
+                tmp_down = opposite_sw[index - i - 1][0]
+
+        # 한쪽 없으면 보이는 쪽과 똑같은 값
+        if tmp_down + tmp_up != 0:
+            if tmp_up == 0:
+                opposite_sw[index] = [tmp_down, h[1]]
+            elif tmp_down == 0:
+                opposite_sw[index] = [tmp_up, h[1]]
+            else:
+                opposite_sw[index] = [(tmp_up + tmp_down) / 2, h[1]]
+
+            # 3칸 이내에 있으면 평균 낸 값과 반대쪽 값의 평균 값 내기
+            if now_sw[index][0] != 0:
+                offset = 840 if now_sw[index][0] > 1000 else -840
+                opposite_sw[index][0] = (opposite_sw[index][0] + (now_sw[index][0] + offset)) / 2
+        else:
+            if now_sw[index][0] == 0:
+                opposite_sw[index][0] = prev_opposite[index][0]
+            else:
+                offset = 840 if now_sw[index][0] > 1000 else -840
+                opposite_sw[index][0] = now_sw[index][0] + offset
+
+    return now_sw, opposite_sw
+
+def calculate_mean_x(data, start_index, end_index):
+    # 시작 인덱스와 끝 인덱스 사이의 x 좌표 추출
+    x_coords = [point[0] for point in data[start_index:end_index+1]]
+    
+    # x 좌표의 평균 계산
+    mean_x = sum(x_coords) / len(x_coords)
+    
+    return mean_x
+
+def get_angle_speed(left_sw, right_sw, left_class, box_num):
+    speed = 254
+    angle1 = 0
+    angle2 = 0
+
+    if left_class == 0:
+        mean_x = calculate_mean_x(left_sw, 0, 4)
+        distance_mid = 1000 - mean_x
+        angle1 =  distance_mid - 300
+    else:
+        mean_x = calculate_mean_x(right_sw, 0, 4)
+        distance_mid = 1000 - mean_x
+        angle1 =  distance_mid - 300
+    
+    mid_ = (left_sw[box_num][0] + right_sw[box_num][0]) / 2
+    angle2 = box_num * 100 / (mid_ - 1000)
+
+    angle = angle1 * 0.2 + angle2 * 0.8
+    return speed, angle
+
+
+
 
 # left_max: -23.5 degree, right_max: 23.5 degree
 # return: resist value
